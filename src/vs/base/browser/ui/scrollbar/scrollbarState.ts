@@ -14,7 +14,7 @@ export class ScrollbarState {
 	 * For the vertical scrollbar: the width.
 	 * For the horizontal scrollbar: the height.
 	 */
-	private readonly _scrollbarSize: number;
+	private _scrollbarSize: number;
 
 	/**
 	 * For the vertical scrollbar: the height of the pair horizontal scrollbar.
@@ -114,6 +114,10 @@ export class ScrollbarState {
 		return false;
 	}
 
+	public setScrollbarSize(scrollbarSize: number): void {
+		this._scrollbarSize = scrollbarSize;
+	}
+
 	private static _computeValues(oppositeScrollbarSize: number, arrowSize: number, visibleSize: number, scrollSize: number, scrollPosition: number) {
 		const computedAvailableSize = Math.max(0, visibleSize - oppositeScrollbarSize);
 		const computedRepresentableSize = Math.max(0, computedAvailableSize - 2 * arrowSize);
@@ -196,6 +200,28 @@ export class ScrollbarState {
 
 		let desiredSliderPosition = offset - this._arrowSize - this._computedSliderSize / 2;
 		return Math.round(desiredSliderPosition / this._computedSliderRatio);
+	}
+
+	/**
+	 * Compute a desired `scrollPosition` from if offset is before or after the slider position.
+	 * If offset is before slider, treat as a page up (or left).  If after, page down (or right).
+	 * `offset` and `_computedSliderPosition` are based on the same coordinate system.
+	 * `_visibleSize` corresponds to a "page" of lines in the returned coordinate system.
+	 */
+	public getDesiredScrollPositionFromOffsetPaged(offset: number): number {
+		if (!this._computedIsNeeded) {
+			// no need for a slider
+			return 0;
+		}
+
+		let correctedOffset = offset - this._arrowSize;  // compensate if has arrows
+		let desiredScrollPosition = this._scrollPosition;
+		if (correctedOffset < this._computedSliderPosition) {
+			desiredScrollPosition -= this._visibleSize;  // page up/left
+		} else {
+			desiredScrollPosition += this._visibleSize;  // page down/right
+		}
+		return desiredScrollPosition;
 	}
 
 	/**

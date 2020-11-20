@@ -6,7 +6,7 @@
 import * as nls from 'vs/nls';
 import { assertIsDefined, isFunction, withNullAsUndefined } from 'vs/base/common/types';
 import { ICodeEditor, getCodeEditor, IPasteEvent } from 'vs/editor/browser/editorBrowser';
-import { TextEditorOptions, EditorInput, EditorOptions } from 'vs/workbench/common/editor';
+import { TextEditorOptions, EditorInput, EditorOptions, IEditorOpenContext } from 'vs/workbench/common/editor';
 import { ResourceEditorInput } from 'vs/workbench/common/editor/resourceEditorInput';
 import { BaseTextEditorModel } from 'vs/workbench/common/editor/textEditorModel';
 import { UntitledTextEditorInput } from 'vs/workbench/services/untitled/common/untitledTextEditorInput';
@@ -16,7 +16,6 @@ import { IStorageService } from 'vs/platform/storage/common/storage';
 import { ITextResourceConfigurationService } from 'vs/editor/common/services/textResourceConfigurationService';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
-import { Event } from 'vs/base/common/event';
 import { ScrollType, IEditor } from 'vs/editor/common/editorCommon';
 import { IEditorGroupsService } from 'vs/workbench/services/editor/common/editorGroupsService';
 import { CancellationToken } from 'vs/base/common/cancellation';
@@ -25,7 +24,6 @@ import { IModelService } from 'vs/editor/common/services/modelService';
 import { IModeService } from 'vs/editor/common/services/modeService';
 import { PLAINTEXT_MODE_ID } from 'vs/editor/common/modes/modesRegistry';
 import { EditorOption, IEditorOptions } from 'vs/editor/common/config/editorOptions';
-import { basenameOrAuthority } from 'vs/base/common/resources';
 import { ModelConstants } from 'vs/editor/common/model';
 
 /**
@@ -55,13 +53,13 @@ export class AbstractTextResourceEditor extends BaseTextEditor {
 		return nls.localize('textEditor', "Text Editor");
 	}
 
-	async setInput(input: EditorInput, options: EditorOptions | undefined, token: CancellationToken): Promise<void> {
+	async setInput(input: EditorInput, options: EditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 
 		// Remember view settings if input changes
 		this.saveTextResourceEditorViewState(this.input);
 
 		// Set input and resolve
-		await super.setInput(input, options, token);
+		await super.setInput(input, options, context, token);
 		const resolvedModel = await input.resolve();
 
 		// Check for cancellation
@@ -86,8 +84,8 @@ export class AbstractTextResourceEditor extends BaseTextEditor {
 			optionsGotApplied = textOptions.apply(textEditor, ScrollType.Immediate);
 		}
 
-		// Otherwise restore View State
-		if (!optionsGotApplied) {
+		// Otherwise restore View State unless disabled via settings
+		if (!optionsGotApplied && this.shouldRestoreTextEditorViewState(input, context)) {
 			this.restoreTextResourceEditorViewState(input, textEditor);
 		}
 
@@ -101,24 +99,11 @@ export class AbstractTextResourceEditor extends BaseTextEditor {
 
 	private restoreTextResourceEditorViewState(editor: EditorInput, control: IEditor) {
 		if (editor instanceof UntitledTextEditorInput || editor instanceof ResourceEditorInput) {
-			const viewState = this.loadTextEditorViewState(editor.getResource());
+			const viewState = this.loadTextEditorViewState(editor.resource);
 			if (viewState) {
 				control.restoreViewState(viewState);
 			}
 		}
-	}
-
-	protected getAriaLabel(): string {
-		let ariaLabel: string;
-
-		const inputName = this.input instanceof UntitledTextEditorInput ? basenameOrAuthority(this.input.getResource()) : this.input?.getName();
-		if (this.input?.isReadonly()) {
-			ariaLabel = inputName ? nls.localize('readonlyEditorWithInputAriaLabel', "{0} readonly editor", inputName) : nls.localize('readonlyEditorAriaLabel', "Readonly editor");
-		} else {
-			ariaLabel = inputName ? nls.localize('writeableEditorWithInputAriaLabel', "{0} editor", inputName) : nls.localize('writeableEditorAriaLabel', "Editor");
-		}
-
-		return ariaLabel;
 	}
 
 	/**
@@ -163,7 +148,7 @@ export class AbstractTextResourceEditor extends BaseTextEditor {
 			return; // only enabled for untitled and resource inputs
 		}
 
-		const resource = input.getResource();
+		const resource = input.resource;
 
 		// Clear view state if input is disposed
 		if (input.isDisposed()) {
@@ -172,12 +157,7 @@ export class AbstractTextResourceEditor extends BaseTextEditor {
 
 		// Otherwise save it
 		else {
-			super.saveTextEditorViewState(resource);
-
-			// Make sure to clean up when the input gets disposed
-			Event.once(input.onDispose)(() => {
-				super.clearTextEditorViewState([resource]);
-			});
+			super.saveTextEditorViewState(resource, input);
 		}
 	}
 }
@@ -214,6 +194,10 @@ export class TextResourceEditor extends AbstractTextResourceEditor {
 	}
 
 	private onDidEditorPaste(e: IPasteEvent, codeEditor: ICodeEditor): void {
+		if (this.input instanceof UntitledTextEditorInput && this.input.model.hasModeSetExplicitly) {
+			return; // do not override mode if it was set explicitly
+		}
+
 		if (e.range.startLineNumber !== 1 || e.range.startColumn !== 1) {
 			return; // only when pasting into first line, first column (= empty document)
 		}

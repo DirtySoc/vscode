@@ -20,7 +20,7 @@ export class FileWatcher extends Disposable {
 
 	constructor(
 		private path: string,
-		private onFileChanges: (changes: IDiskFileChange[]) => void,
+		private onDidFilesChange: (changes: IDiskFileChange[]) => void,
 		private onLogMessage: (msg: ILogMessage) => void,
 		private verboseLogging: boolean
 	) {
@@ -85,7 +85,7 @@ export class FileWatcher extends Disposable {
 		}
 
 		// Handle emit through delayer to accommodate for bulk changes and thus reduce spam
-		this.fileChangesDelayer.trigger(() => {
+		this.fileChangesDelayer.trigger(async () => {
 			const fileChanges = this.fileChangesBuffer;
 			this.fileChangesBuffer = [];
 
@@ -101,10 +101,8 @@ export class FileWatcher extends Disposable {
 
 			// Fire
 			if (normalizedFileChanges.length > 0) {
-				this.onFileChanges(normalizedFileChanges);
+				this.onDidFilesChange(normalizedFileChanges);
 			}
-
-			return Promise.resolve();
 		});
 	}
 

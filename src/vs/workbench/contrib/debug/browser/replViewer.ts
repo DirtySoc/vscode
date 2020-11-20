@@ -5,9 +5,9 @@
 
 import severity from 'vs/base/common/severity';
 import * as dom from 'vs/base/browser/dom';
-import { IAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
+import { IListAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
 import { Variable } from 'vs/workbench/contrib/debug/common/debugModel';
-import { SimpleReplElement, RawObjectReplElement, ReplEvaluationInput, ReplEvaluationResult } from 'vs/workbench/contrib/debug/common/replModel';
+import { SimpleReplElement, RawObjectReplElement, ReplEvaluationInput, ReplEvaluationResult, ReplGroup } from 'vs/workbench/contrib/debug/common/replModel';
 import { CachedListVirtualDelegate } from 'vs/base/browser/ui/list/list';
 import { ITreeRenderer, ITreeNode, IAsyncDataSource } from 'vs/base/browser/ui/tree/tree';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
@@ -23,6 +23,8 @@ import { IReplElementSource, IDebugService, IExpression, IReplElement, IDebugCon
 import { IDisposable, dispose } from 'vs/base/common/lifecycle';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
 import { localize } from 'vs/nls';
+import { CountBadge } from 'vs/base/browser/ui/countBadge/countBadge';
+import { attachBadgeStyler } from 'vs/platform/theme/common/styler';
 
 const $ = dom.$;
 
@@ -30,17 +32,23 @@ interface IReplEvaluationInputTemplateData {
 	label: HighlightedLabel;
 }
 
+interface IReplGroupTemplateData {
+	label: HighlightedLabel;
+}
+
 interface IReplEvaluationResultTemplateData {
 	value: HTMLElement;
-	annotation: HTMLElement;
 }
 
 interface ISimpleReplElementTemplateData {
 	container: HTMLElement;
+	count: CountBadge;
+	countContainer: HTMLElement;
 	value: HTMLElement;
 	source: HTMLElement;
 	getReplElementSource(): IReplElementSource | undefined;
 	toDispose: IDisposable[];
+	elementListener: IDisposable;
 }
 
 interface IRawObjectReplTemplateData {
@@ -48,7 +56,6 @@ interface IRawObjectReplTemplateData {
 	expression: HTMLElement;
 	name: HTMLElement;
 	value: HTMLElement;
-	annotation: HTMLElement;
 	label: HighlightedLabel;
 }
 
@@ -76,6 +83,29 @@ export class ReplEvaluationInputsRenderer implements ITreeRenderer<ReplEvaluatio
 	}
 }
 
+export class ReplGroupRenderer implements ITreeRenderer<ReplGroup, FuzzyScore, IReplGroupTemplateData> {
+	static readonly ID = 'replGroup';
+
+	get templateId(): string {
+		return ReplGroupRenderer.ID;
+	}
+
+	renderTemplate(container: HTMLElement): IReplEvaluationInputTemplateData {
+		const input = dom.append(container, $('.expression'));
+		const label = new HighlightedLabel(input, false);
+		return { label };
+	}
+
+	renderElement(element: ITreeNode<ReplGroup, FuzzyScore>, _index: number, templateData: IReplGroupTemplateData): void {
+		const replGroup = element.element;
+		templateData.label.set(replGroup.name, createMatches(element.filterData));
+	}
+
+	disposeTemplate(_templateData: IReplEvaluationInputTemplateData): void {
+		// noop
+	}
+}
+
 export class ReplEvaluationResultsRenderer implements ITreeRenderer<ReplEvaluationResult, FuzzyScore, IReplEvaluationResultTemplateData> {
 	static readonly ID = 'replEvaluationResult';
 
@@ -88,9 +118,8 @@ export class ReplEvaluationResultsRenderer implements ITreeRenderer<ReplEvaluati
 	renderTemplate(container: HTMLElement): IReplEvaluationResultTemplateData {
 		const output = dom.append(container, $('.evaluation-result.expression'));
 		const value = dom.append(output, $('span.value'));
-		const annotation = dom.append(output, $('span'));
 
-		return { value, annotation };
+		return { value };
 	}
 
 	renderElement(element: ITreeNode<ReplEvaluationResult, FuzzyScore>, index: number, templateData: IReplEvaluationResultTemplateData): void {
@@ -100,10 +129,6 @@ export class ReplEvaluationResultsRenderer implements ITreeRenderer<ReplEvaluati
 			colorize: true,
 			linkDetector: this.linkDetector
 		});
-		if (expression.hasChildren) {
-			templateData.annotation.className = 'annotation codicon codicon-info';
-			templateData.annotation.title = localize('stateCapture', "Object state is captured from first evaluation");
-		}
 	}
 
 	disposeTemplate(templateData: IReplEvaluationResultTemplateData): void {
@@ -127,13 +152,16 @@ export class ReplSimpleElementsRenderer implements ITreeRenderer<SimpleReplEleme
 
 	renderTemplate(container: HTMLElement): ISimpleReplElementTemplateData {
 		const data: ISimpleReplElementTemplateData = Object.create(null);
-		dom.addClass(container, 'output');
+		container.classList.add('output');
 		const expression = dom.append(container, $('.output.expression.value-and-source'));
 
 		data.container = container;
+		data.countContainer = dom.append(expression, $('.count-badge-wrapper'));
+		data.count = new CountBadge(data.countContainer);
 		data.value = dom.append(expression, $('span.value'));
 		data.source = dom.append(expression, $('.source'));
 		data.toDispose = [];
+		data.toDispose.push(attachBadgeStyler(data.count, this.themeService));
 		data.toDispose.push(dom.addDisposableListener(data.source, 'click', e => {
 			e.preventDefault();
 			e.stopPropagation();
@@ -152,6 +180,8 @@ export class ReplSimpleElementsRenderer implements ITreeRenderer<SimpleReplEleme
 	}
 
 	renderElement({ element }: ITreeNode<SimpleReplElement, FuzzyScore>, index: number, templateData: ISimpleReplElementTemplateData): void {
+		this.setElementCount(element, templateData);
+		templateData.elementListener = element.onDidChangeCount(() => this.setElementCount(element, templateData));
 		// value
 		dom.clearNode(templateData.value);
 		// Reset classes to clear ansi decorations since templates are reused
@@ -159,14 +189,27 @@ export class ReplSimpleElementsRenderer implements ITreeRenderer<SimpleReplEleme
 		const result = handleANSIOutput(element.value, this.linkDetector, this.themeService, element.session);
 		templateData.value.appendChild(result);
 
-		dom.addClass(templateData.value, (element.severity === severity.Warning) ? 'warn' : (element.severity === severity.Error) ? 'error' : (element.severity === severity.Ignore) ? 'ignore' : 'info');
+		templateData.value.classList.add((element.severity === severity.Warning) ? 'warn' : (element.severity === severity.Error) ? 'error' : (element.severity === severity.Ignore) ? 'ignore' : 'info');
 		templateData.source.textContent = element.sourceData ? `${element.sourceData.source.name}:${element.sourceData.lineNumber}` : '';
-		templateData.source.title = element.sourceData ? this.labelService.getUriLabel(element.sourceData.source.uri) : '';
+		templateData.source.title = element.sourceData ? `${this.labelService.getUriLabel(element.sourceData.source.uri)}:${element.sourceData.lineNumber}` : '';
 		templateData.getReplElementSource = () => element.sourceData;
+	}
+
+	private setElementCount(element: SimpleReplElement, templateData: ISimpleReplElementTemplateData): void {
+		if (element.count >= 2) {
+			templateData.count.setCount(element.count);
+			templateData.countContainer.hidden = false;
+		} else {
+			templateData.countContainer.hidden = true;
+		}
 	}
 
 	disposeTemplate(templateData: ISimpleReplElementTemplateData): void {
 		dispose(templateData.toDispose);
+	}
+
+	disposeElement(_element: ITreeNode<SimpleReplElement, FuzzyScore>, _index: number, templateData: ISimpleReplElementTemplateData): void {
+		templateData.elementListener.dispose();
 	}
 }
 
@@ -206,15 +249,14 @@ export class ReplRawObjectsRenderer implements ITreeRenderer<RawObjectReplElemen
 	}
 
 	renderTemplate(container: HTMLElement): IRawObjectReplTemplateData {
-		dom.addClass(container, 'output');
+		container.classList.add('output');
 
 		const expression = dom.append(container, $('.output.expression'));
 		const name = dom.append(expression, $('span.name'));
 		const label = new HighlightedLabel(name, false);
 		const value = dom.append(expression, $('span.value'));
-		const annotation = dom.append(expression, $('span'));
 
-		return { container, expression, name, label, value, annotation };
+		return { container, expression, name, label, value };
 	}
 
 	renderElement(node: ITreeNode<RawObjectReplElement, FuzzyScore>, index: number, templateData: IRawObjectReplTemplateData): void {
@@ -232,15 +274,6 @@ export class ReplRawObjectsRenderer implements ITreeRenderer<RawObjectReplElemen
 			showHover: false,
 			linkDetector: this.linkDetector
 		});
-
-		// annotation if any
-		if (element.annotation) {
-			templateData.annotation.className = 'annotation codicon codicon-info';
-			templateData.annotation.title = element.annotation;
-		} else {
-			templateData.annotation.className = '';
-			templateData.annotation.title = '';
-		}
 	}
 
 	disposeTemplate(templateData: IRawObjectReplTemplateData): void {
@@ -296,6 +329,9 @@ export class ReplDelegate extends CachedListVirtualDelegate<IReplElement> {
 			// Variable with no name is a top level variable which should be rendered like a repl element #17404
 			return ReplSimpleElementsRenderer.ID;
 		}
+		if (element instanceof ReplGroup) {
+			return ReplGroupRenderer.ID;
+		}
 
 		return ReplRawObjectsRenderer.ID;
 	}
@@ -317,7 +353,7 @@ export class ReplDataSource implements IAsyncDataSource<IDebugSession, IReplElem
 			return true;
 		}
 
-		return !!(<IExpressionContainer>element).hasChildren;
+		return !!(<IExpressionContainer | ReplGroup>element).hasChildren;
 	}
 
 	getChildren(element: IReplElement | IDebugSession): Promise<IReplElement[]> {
@@ -327,21 +363,32 @@ export class ReplDataSource implements IAsyncDataSource<IDebugSession, IReplElem
 		if (element instanceof RawObjectReplElement) {
 			return element.getChildren();
 		}
+		if (element instanceof ReplGroup) {
+			return Promise.resolve(element.getChildren());
+		}
 
 		return (<IExpression>element).getChildren();
 	}
 }
 
-export class ReplAccessibilityProvider implements IAccessibilityProvider<IReplElement> {
+export class ReplAccessibilityProvider implements IListAccessibilityProvider<IReplElement> {
+
+	getWidgetAriaLabel(): string {
+		return localize('debugConsole', "Debug Console");
+	}
+
 	getAriaLabel(element: IReplElement): string {
 		if (element instanceof Variable) {
-			return localize('replVariableAriaLabel', "Variable {0} has value {1}, read eval print loop, debug", element.name, element.value);
+			return localize('replVariableAriaLabel', "Variable {0}, value {1}", element.name, element.value);
 		}
 		if (element instanceof SimpleReplElement || element instanceof ReplEvaluationInput || element instanceof ReplEvaluationResult) {
-			return localize('replValueOutputAriaLabel', "{0}, read eval print loop, debug", element.value);
+			return element.value + (element instanceof SimpleReplElement && element.count > 1 ? localize('occurred', ", occured {0} times", element.count) : '');
 		}
 		if (element instanceof RawObjectReplElement) {
-			return localize('replRawObjectAriaLabel', "Repl variable {0} has value {1}, read eval print loop, debug", element.name, element.value);
+			return localize('replRawObjectAriaLabel', "Debug console variable {0}, value {1}", element.name, element.value);
+		}
+		if (element instanceof ReplGroup) {
+			return localize('replGroup', "Debug console group {0}", element.name);
 		}
 
 		return '';

@@ -12,6 +12,7 @@ import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
 import { NullLogService } from 'vs/platform/log/common/log';
 import { Handler } from 'vs/editor/common/editorCommon';
 import { CoreEditingCommands } from 'vs/editor/browser/controller/coreCommands';
+import { createTextModel } from 'vs/editor/test/common/editorTestUtils';
 
 suite('SnippetController2', function () {
 
@@ -36,7 +37,7 @@ suite('SnippetController2', function () {
 
 	setup(function () {
 		contextKeys = new MockContextKeyService();
-		model = TextModel.createFromString('if\n    $state\nfi');
+		model = createTextModel('if\n    $state\nfi');
 		editor = createTestCodeEditor({ model: model });
 		editor.setSelections([new Selection(1, 1, 1, 1), new Selection(2, 5, 2, 5)]);
 		assert.equal(model.getEOL(), '\n');
@@ -437,5 +438,21 @@ suite('SnippetController2', function () {
 
 		ctrl.insert('\nfoo');
 		assertSelections(editor, new Selection(2, 8, 2, 8));
+	});
+
+	test('leading TAB by snippets won\'t replace by spaces #101870', function () {
+		const ctrl = new SnippetController2(editor, logService, contextKeys);
+		model.setValue('');
+		model.updateOptions({ insertSpaces: true, tabSize: 4 });
+		ctrl.insert('\tHello World\n\tNew Line');
+		assert.strictEqual(model.getValue(), '    Hello World\n    New Line');
+	});
+
+	test('leading TAB by snippets won\'t replace by spaces #101870 (part 2)', function () {
+		const ctrl = new SnippetController2(editor, logService, contextKeys);
+		model.setValue('');
+		model.updateOptions({ insertSpaces: true, tabSize: 4 });
+		ctrl.insert('\tHello World\n\tNew Line\n${1:\tmore}');
+		assert.strictEqual(model.getValue(), '    Hello World\n    New Line\n    more');
 	});
 });
